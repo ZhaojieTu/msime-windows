@@ -1,0 +1,37 @@
+name: Verify PR 1 native input using built installer
+
+on:
+  push:
+    branches: [verify/pr-1-input-rerun]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45609848658
+          name: dev-installer
+          path: ${{ runner.temp }}/installer
+      - name: Verify native Windows input
+        shell: pwsh
+        run: |
+          $root=Join-Path $env:RUNNER_TEMP 'installer'
+          $installer=@(Get-ChildItem -LiteralPath $root -File -Filter 'MetasequoiaIME_Setup*.exe')
+          if($installer.Count -ne 1){throw 'Expected one installer'}
+          ./scripts/ci/verify-voice-input-fork.ps1 -Installer $installer[0].FullName -Certificate (Join-Path $root 'dev-build.cer')
+      - name: Upload native acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: voice-native-acceptance
+          retention-days: 7
+          path: ${{ runner.temp }}/msime-voice-proof
+          if-no-files-found: ignore

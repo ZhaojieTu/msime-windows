@@ -9,8 +9,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REPOSITORY -ne 'ZhaojieTu/msi
 
 $proof = Join-Path $env:RUNNER_TEMP 'msime-voice-proof'
 $fixture = Join-Path $env:RUNNER_TEMP 'msime-voice-fixture'
-$data = Join-Path $fixture 'data'
-New-Item -ItemType Directory -Path $proof,$fixture,$data -Force | Out-Null
+New-Item -ItemType Directory -Path $proof,$fixture -Force | Out-Null
 $progress = Join-Path $proof 'acceptance.txt'
 $installerLog = Join-Path $proof 'installer.log'
 $expected = '水杉输入框验收，中文已上屏。'
@@ -29,10 +28,14 @@ if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -n
     throw "Test installer signature verification failed: $($signature.Status)"
 }
 $installation = Start-Process -FilePath $installerPath -ArgumentList @(
-    '/VERYSILENT','/NORESTART','/SP-',('/DATADIR="{0}"' -f $data),('/LOG="{0}"' -f $installerLog)
+    '/VERYSILENT','/NORESTART','/SP-',('/LOG="{0}"' -f $installerLog)
 ) -WindowStyle Hidden -Wait -PassThru
 if ($installation.ExitCode -ne 0) { throw "Test install failed: $($installation.ExitCode)" }
-'INSTALLER_OK=1' | Add-Content -LiteralPath $progress
+$data = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Metasequoia\MetasequoiaIME' -Name DataDir).DataDir
+if (-not $data -or -not (Test-Path -LiteralPath (Join-Path $data 'config.toml'))) {
+    throw 'Cannot find the data directory registered by the installer'
+}
+'INSTALLER_OK=1','INSTALLED_CONFIG_OK=1' | Add-Content -LiteralPath $progress
 foreach ($processName in 'MetasequoiaImeWatchdog','MetasequoiaImeServer') {
     Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
 }
