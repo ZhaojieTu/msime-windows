@@ -239,8 +239,16 @@ public static class VoiceSmoke
     $history = Join-Path $data 'voice-history'
     $texts = @(Get-ChildItem -LiteralPath $history -Recurse -File -Filter 'transcript.txt')
     if ($texts.Count -ne 1 -or [IO.File]::ReadAllText($texts[0].FullName) -cne $expected) {throw 'Original transcript recovery mismatch'}
-    if ((Get-Item -LiteralPath (Join-Path $texts[0].DirectoryName 'recording.wav')).Length -ne 32044) {throw 'Original WAV size mismatch'}
-    'NATIVE_EDIT_COMMIT=1','ASR_UPLOAD=1','ORIGINAL_TRANSCRIPT=1','ORIGINAL_WAV=1' | Add-Content -LiteralPath $progress
+    'NATIVE_EDIT_COMMIT=1','ASR_UPLOAD=1','ORIGINAL_TRANSCRIPT=1' | Add-Content -LiteralPath $progress
+    $wavPath = Join-Path $texts[0].DirectoryName 'recording.wav'
+    $meta = & $python -c 'import json,sys,wave; w=wave.open(sys.argv[1],"rb"); print(json.dumps(dict(channels=w.getnchannels(),width=w.getsampwidth(),rate=w.getframerate(),frames=w.getnframes()),separators=(",",":")))' $wavPath
+    if($LASTEXITCODE -ne 0){throw 'Cannot parse saved WAV'}
+    "ORIGINAL_WAV_METADATA=$meta" | Add-Content -LiteralPath $progress
+    $wav = $meta | ConvertFrom-Json
+    if ($wav.channels -ne 1 -or $wav.width -ne 2 -or $wav.rate -ne 16000 -or $wav.frames -ne 16000) {
+        throw "Saved WAV does not match the one-second mono fixture: $meta"
+    }
+    'ORIGINAL_WAV=1' | Add-Content -LiteralPath $progress
 } finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
     if ($backend -and -not $backend.HasExited) { Stop-Process -Id $backend.Id -ErrorAction SilentlyContinue }
