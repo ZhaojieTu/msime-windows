@@ -559,6 +559,8 @@ skin_name = "default"
 # 语音输入
 #
 [voice_input]
+# Keep completed recordings and their ASR transcripts in the local voice-history directory.
+save_history = false
 # 语音输入
 voice_input = true
 # 全局语音快捷键（可分别启用或关闭）

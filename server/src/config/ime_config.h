@@ -22,6 +22,7 @@ struct VoiceInputConfig
     bool hotkey_ctrl_win = false;
     bool hotkey_rctrl_ralt = false;
     bool hotkey_hold_space_lock = true;
+    bool save_history = false;
     // doubao | openai | siliconflow | groq | local
     std::string asr_provider = "local";
     // asr_provider == "local" 时使用的本地模型 id（voice-input/local_asr_catalog.h）；空 = 未选择。

@@ -299,6 +299,8 @@ void TrayMenuPresenter::RebuildScene()
         Hide();
         VoiceInput::ToggleRecording();
     });
+    addItem(L"打开语音记录", kSvgVoice, false)->SetOnClick(launch(VoiceInput::OpenVoiceHistory));
+    addItem(L"重试最近未转写的录音", kSvgVoice, false)->SetOnClick(launch(VoiceInput::RetryLastVoiceRecording));
     addItem(L"设置", kSvgSettings, false)->SetOnClick(launch(OpenSettingsApplication));
     addItem(L"关于", kSvgAbout, false)->SetOnClick(launch(OpenSettingsAboutApplication));
 

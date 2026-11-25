@@ -41,6 +41,7 @@ target_link_libraries(test_voice_lock_recovery
     fmt::fmt
     nlohmann_json::nlohmann_json
     user32
+    shell32
     shcore)
 add_test(NAME voice_lock_recovery COMMAND test_voice_lock_recovery)
 set_tests_properties(voice_lock_recovery PROPERTIES TIMEOUT 60)
@@ -477,6 +478,11 @@ add_executable(test_voice_service_lifecycle src/test_voice_service_lifecycle.cpp
 target_include_directories(test_voice_service_lifecycle PRIVATE ../src "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_features(test_voice_service_lifecycle PRIVATE cxx_std_17)
 add_test(NAME voice_service_lifecycle COMMAND test_voice_service_lifecycle)
+
+add_executable(test_voice_recovery src/test_voice_recovery.cpp)
+target_include_directories(test_voice_recovery PRIVATE ../src "${MSIME_ENGINE_DIR}/voice/include")
+target_compile_features(test_voice_recovery PRIVATE cxx_std_17)
+add_test(NAME voice_recovery COMMAND test_voice_recovery)
 set_tests_properties(voice_service_lifecycle PROPERTIES TIMEOUT 15)
 
 if(WIN32)

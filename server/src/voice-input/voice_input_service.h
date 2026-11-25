@@ -7,6 +7,8 @@ void RefreshKeyboardHook();
 void SetImeActive(bool active);
 void Shutdown();
 void ToggleRecording();
+void OpenVoiceHistory();
+void RetryLastVoiceRecording();
 // External platform controllers enqueue lifecycle commands on the same
 // serialized voice-control thread as tray and hotkey input.
 void StartRecording();

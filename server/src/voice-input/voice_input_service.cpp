@@ -11,6 +11,9 @@
 #include "log/candidate_diag_log.h"
 #include "voice_providers.h"
 #include "voice_batch_protocol.h"
+#include "voice_batch_limits.h"
+#include "voice_history.h"
+#include "engine/core/data_path.h"
 #include "ipc/ipc.h"
 #include "system_audio_muter.h"
 #include "utils/common_utils.h"
@@ -27,6 +30,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <windows.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -59,6 +63,10 @@ constexpr long kPolishThinkingTimeoutMs = 30000L;
 metasequoia::voice::AudioCapture g_capture;
 std::mutex g_mutex;
 std::vector<float> g_samples;
+std::atomic<bool> g_save_voice_history{false};
+std::mutex g_voice_history_mutex;
+unsigned g_voice_history_operations = 0;
+std::future<void> g_voice_retry;
 // 录音期间边收边识别的会话（豆包，或本地流式模型）；整句识别时为空，音频攒在 g_samples。
 std::unique_ptr<StreamingAsr> g_stream_asr;
 std::atomic<std::size_t> g_recorded_frames{0};
@@ -642,12 +650,7 @@ bool IsSiliconFlowAsr(const VoiceInputConfig &config)
     return provider == "siliconflow";
 }
 
-struct RecognitionResult
-{
-    std::string text;
-    std::string error;
-};
-
+using RecognitionResult = VoiceInput::VoiceRecognition;
 std::string JsonErrorMessage(const std::string &body)
 {
     try
@@ -682,17 +685,8 @@ std::string JsonErrorMessage(const std::string &body)
     return body;
 }
 
-RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputConfig &config)
+RecognitionResult RecognizeBatch(const std::vector<float> &samples, const VoiceInputConfig &config)
 {
-    if (VoiceInput::IsLocalAsrProvider(config.asr_provider))
-    {
-        local_asr::RecognitionResult local = local_asr::Recognize(samples, config.local_asr_model, config.language);
-        // 本地识别不会因为「没说话」报错（那只是空文本），出错都是运行库或模型载不进来，属于配置问题，
-        // 静默吞掉用户就只看到每次都没字，所以照配置类错误的做法提示。
-        if (!local.error.empty())
-            ShowVoiceNotice(string_to_wstring(local.error) + L"。");
-        return {std::move(local.text), std::move(local.error)};
-    }
     const std::string asr_token = VoiceInput::ResolveAsrToken(config);
     if (asr_token.empty() || config.asr_endpoint.empty())
         return {{}, "ASR Token 或接口地址为空。"};
@@ -709,7 +703,7 @@ RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputC
     {
         return {{}, "录音数据无效或超过 20 MiB 上传限制。"};
     }
-    const int attempts = siliconflow ? 2 : 1;
+    constexpr int attempts = 2;
     std::string response;
     std::string trace_id;
     char curl_error[CURL_ERROR_SIZE] = {};
@@ -718,7 +712,7 @@ RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputC
     for (int attempt = 0; attempt < attempts; ++attempt)
     {
         if (attempt > 0)
-            Sleep(400);
+            Sleep(http_status == 429 ? 1500 : 500);
         response.clear();
         trace_id.clear();
         curl_error[0] = 0;
@@ -750,7 +744,11 @@ RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputC
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        if (result == CURLE_OK && http_status < 500)
+        const bool transient_http = http_status == 408 || http_status == 429 || http_status == 500 ||
+                                    http_status == 502 || http_status == 503 || http_status == 504;
+        const bool transient_network = result == CURLE_OPERATION_TIMEDOUT || result == CURLE_COULDNT_CONNECT ||
+                                       result == CURLE_SEND_ERROR || result == CURLE_RECV_ERROR;
+        if ((result == CURLE_OK && !transient_http) || (result != CURLE_OK && !transient_network))
             break;
     }
     if (result != CURLE_OK)
@@ -778,6 +776,86 @@ RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputC
     catch (...)
     {
         return {{}, "语音识别返回了无法解析的结果。"};
+    }
+}
+
+RecognitionResult Recognize(const std::vector<float> &samples, const VoiceInputConfig &config)
+{
+    if (VoiceInput::IsLocalAsrProvider(config.asr_provider))
+    {
+        auto local = local_asr::Recognize(samples, config.local_asr_model, config.language);
+        return {std::move(local.text), std::move(local.error)};
+    }
+
+    const auto limit =
+        VoiceInput::BatchSampleLimit(VoiceInput::NormalizeProviderId(config.asr_provider), config.asr_endpoint,
+                                     kSampleRate, metasequoia::voice::maximum_encoded_audio_bytes);
+    return VoiceInput::TranscribeVoiceBatches(samples, limit, kSampleRate,
+                                              [&](const auto &part) { return RecognizeBatch(part, config); });
+}
+
+std::filesystem::path VoiceHistoryDirectory()
+{
+    return metasequoia::data_directory() / L"voice-history";
+}
+
+class VoiceHistoryActivity
+{
+  public:
+    explicit VoiceHistoryActivity(bool enabled) : active_(enabled)
+    {
+        if (active_)
+        {
+            std::lock_guard<std::mutex> lock(g_voice_history_mutex);
+            ++g_voice_history_operations;
+        }
+    }
+
+    ~VoiceHistoryActivity()
+    {
+        Finish();
+    }
+    VoiceHistoryActivity(const VoiceHistoryActivity &) = delete;
+    VoiceHistoryActivity &operator=(const VoiceHistoryActivity &) = delete;
+
+    void Finish()
+    {
+        if (active_)
+        {
+            std::lock_guard<std::mutex> lock(g_voice_history_mutex);
+            --g_voice_history_operations;
+            active_ = false;
+        }
+    }
+
+  private:
+    bool active_;
+};
+
+std::filesystem::path KeepVoiceRecording(const std::vector<float> &samples)
+{
+    if (samples.empty())
+        return {};
+    try
+    {
+        return VoiceInput::VoiceHistory::SaveRecording(VoiceHistoryDirectory(), samples);
+    }
+    catch (const std::exception &)
+    {
+        return {};
+    }
+}
+
+bool KeepVoiceTranscript(const std::filesystem::path &entry, const std::string &text)
+{
+    try
+    {
+        VoiceInput::VoiceHistory::SaveTranscript(entry, text);
+        return true;
+    }
+    catch (const std::exception &)
+    {
+        return false;
     }
 }
 
@@ -1373,10 +1451,7 @@ void CommitRecognizedText(const std::string &utf8, const VoiceInputConfig &confi
         // with a current route; commit through that owner.
         if (SendVoiceCompositionToOwner(g_inline_owner,
                                         Global::DataFromServerMsgTypeToTsfWorkerThread::CommitVoiceComposition, text))
-        {
             ResetInlinePreeditState();
-            return;
-        }
         // The prefix was already streamed into the old field; replaying the
         // full text would duplicate it, so the full result stays in the card.
         // Never SendInput from scratch here.
@@ -1392,10 +1467,10 @@ void CommitRecognizedText(const std::string &utf8, const VoiceInputConfig &confi
         // This action requires a live captured route. A failed chunk leaves
         // any delivered prefix in the field; keep the full original on the
         // Copy surface without replaying it through another delivery method.
-        if (SendTextViaTsf(text, final_target) == text.size())
-        {
-            return;
-        }
+        SendTextViaTsf(text, final_target);
+        // Worker-pipe success does not acknowledge the host edit session. The
+        // focus token may change after enqueue, or TSF may reject the write.
+        // Keep a copyable result without replaying text that may have landed.
         show_card(text);
         return;
     case VoiceInput::VoiceCommitAction::CommitSendInput:
@@ -1439,7 +1514,8 @@ void AudioCallback(const float *samples, std::size_t frames)
     if (g_stream_asr)
     {
         g_stream_asr->PushFloatSamples(samples, frames);
-        return;
+        if (!g_save_voice_history)
+            return;
     }
     std::lock_guard<std::mutex> lock(g_mutex);
     g_samples.insert(g_samples.end(), samples, samples + frames);
@@ -1551,6 +1627,7 @@ bool StartRecording()
         g_samples.clear();
     }
     g_recorded_frames = 0;
+    g_save_voice_history = config.save_history;
     const bool use_streaming = UsesStreamingAsr(config);
     const bool want_inline = ShouldStreamInlinePreedit(config);
     const VoiceOverlayAnchor overlay_anchor = CaptureVoiceOverlayAnchor();
@@ -1696,8 +1773,15 @@ void StopRecording(std::uint64_t voice_session, std::uintptr_t lock_ticket)
     g_capture.stop();
     if (g_capture.callback_failed())
     {
+        bool backed_up = false;
+        if (g_save_voice_history)
+        {
+            std::lock_guard<std::mutex> audio_lock(g_mutex);
+            VoiceHistoryActivity activity(true);
+            backed_up = !KeepVoiceRecording(g_samples).empty();
+        }
         DiscardRecording(config);
-        ShowVoiceNotice(L"录音中断，请重试。");
+        ShowVoiceNotice(backed_up ? L"录音中断。已保存录到的部分，可从水杉菜单重试。" : L"录音中断，请重试。");
         return;
     }
     RestoreSystemAudioIfMuted();
@@ -1747,18 +1831,23 @@ void StopRecording(std::uint64_t voice_session, std::uintptr_t lock_ticket)
                           g_network_tasks.end());
     g_network_tasks.emplace_back(
         std::async(std::launch::async, [samples = std::move(samples), client = std::move(stream_asr), config,
-                                        batch_recognition, stream_inline, voice_session, stop_target]() mutable {
+                                        batch_recognition, stream_inline, voice_session, stop_target,
+                                        save_history = g_save_voice_history.load()]() mutable {
+            VoiceHistoryActivity history_activity(save_history);
+            const auto history_entry = save_history ? KeepVoiceRecording(samples) : std::filesystem::path{};
             RecognitionResult recognition;
             if (client)
             {
                 recognition.text = client->Finish();
                 recognition.error = client->LastError();
-                // 同整句的本地识别：出错只会是运行库或模型载不进来，静默吞掉用户就只看到每次都没字。
-                if (!recognition.error.empty() && VoiceInput::IsLocalAsrProvider(config.asr_provider))
-                    ShowVoiceNotice(string_to_wstring(recognition.error) + L"。");
             }
             else
                 recognition = Recognize(samples, config);
+            const bool has_result = recognition.error.empty() && !recognition.text.empty();
+            const bool history_error =
+                save_history &&
+                (history_entry.empty() || (has_result && !KeepVoiceTranscript(history_entry, recognition.text)));
+            history_activity.Finish();
             const bool polishing = recognition.error.empty() && ShouldPolish(recognition.text, config);
             {
                 // Session changes and overlay updates share the send lock, so
@@ -1781,14 +1870,17 @@ void StopRecording(std::uint64_t voice_session, std::uintptr_t lock_ticket)
                         g_overlay.show();
                 }
             }
-            // 识别失败（静音、没说出话、服务商对空音频报错等）保持静默：
-            // 不弹窗、不提交、提示条照常收起，就像什么都没发生。
-            // 但原因要进诊断日志——部署在别的机器上排查时，这是唯一的证据；
-            // 只记服务商名和错误文案，绝不记语音内容或转写文本。
             if (!recognition.error.empty())
+                DIAG_LOGF(L"voice: asr failed, provider={}", string_to_wstring(config.asr_provider));
+            if (g_voice_session == voice_session && (!recognition.error.empty() || history_error))
             {
-                DIAG_LOGF(L"voice: asr failed, provider={}, error={}", string_to_wstring(config.asr_provider),
-                          string_to_wstring(recognition.error));
+                std::wstring message =
+                    recognition.error.empty() ? L"无法保存语音记录。" : string_to_wstring(recognition.error);
+                if (!recognition.error.empty() && !history_entry.empty())
+                    message += L"。录音已保存，可从水杉菜单重试。";
+                else if (history_error && !recognition.error.empty())
+                    message += L"。本机录音备份也未能保存。";
+                ShowVoiceNotice(std::move(message));
             }
             const std::string text = recognition.error.empty() ? Polish(recognition.text, config) : std::string();
             {
@@ -2125,6 +2217,71 @@ bool VoiceInput::IsRecording()
     return g_recording;
 }
 
+void VoiceInput::OpenVoiceHistory()
+{
+    try
+    {
+        const auto path = VoiceHistoryDirectory();
+        std::filesystem::create_directories(path);
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <=
+            32)
+            ShowVoiceNotice(L"无法打开语音记录目录。");
+    }
+    catch (const std::exception &)
+    {
+        ShowVoiceNotice(L"无法创建语音记录目录。");
+    }
+}
+
+void VoiceInput::RetryLastVoiceRecording()
+{
+    if (g_voice_retry.valid() && g_voice_retry.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    {
+        ShowVoiceNotice(L"已有一段录音正在重试。");
+        return;
+    }
+    const auto config = GetConfiguredVoiceInput();
+    if (VoiceInput::IsDoubaoAsrProvider(config.asr_provider))
+    {
+        ShowVoiceNotice(L"当前豆包流式接口不能重试已保存文件，请先选择本地或整段 ASR 服务。");
+        return;
+    }
+    g_voice_retry = std::async(std::launch::async, [config] {
+        try
+        {
+            std::filesystem::path entry;
+            {
+                std::lock_guard<std::mutex> lock(g_voice_history_mutex);
+                if (g_voice_history_operations == 0)
+                    entry = VoiceInput::VoiceHistory::LatestUntranscribed(VoiceHistoryDirectory());
+                else
+                {
+                    ShowVoiceNotice(L"另一段录音正在转写，请等它结束后再重试。");
+                    return;
+                }
+            }
+            if (entry.empty())
+            {
+                ShowVoiceNotice(L"没有可重试的录音。");
+                return;
+            }
+            const auto result = Recognize(VoiceInput::VoiceHistory::ReadRecording(entry), config);
+            if (result.text.empty() || !result.error.empty())
+            {
+                const auto detail = result.error.empty() ? L"没有识别出文字。" : string_to_wstring(result.error);
+                ShowVoiceNotice(detail + L" 原录音仍在语音记录目录。");
+                return;
+            }
+            VoiceInput::VoiceHistory::SaveTranscript(entry, result.text);
+            ShowVoiceNotice(L"重试成功。原文已保存，打开语音记录目录即可查看。");
+        }
+        catch (const std::exception &)
+        {
+            ShowVoiceNotice(L"重试失败。请检查语音记录目录和可用磁盘空间。");
+        }
+    });
+}
+
 void VoiceInput::Shutdown()
 {
     const bool release_ralt = g_suppress_ralt_until_up;
@@ -2147,6 +2304,8 @@ void VoiceInput::Shutdown()
     for (auto &task : g_network_tasks)
         task.wait();
     g_network_tasks.clear();
+    if (g_voice_retry.valid())
+        g_voice_retry.wait();
     if (g_message_window)
     {
         DestroyWindow(g_message_window);

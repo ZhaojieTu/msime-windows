@@ -953,6 +953,7 @@ bool LoadImeConfig()
         voice.hotkey_ctrl_win = tbl["voice_input"]["hotkey_ctrl_win"].value_or(false);
         voice.hotkey_rctrl_ralt = tbl["voice_input"]["hotkey_rctrl_ralt"].value_or(false);
         voice.hotkey_hold_space_lock = tbl["voice_input"]["hotkey_hold_space_lock"].value_or(true);
+        voice.save_history = tbl["voice_input"]["save_history"].value_or(false);
         voice.asr_provider = tbl["voice_input"]["asr_provider"].value_or(std::string("local"));
         voice.asr_app_key = tbl["voice_input"]["asr_app_key"].value_or(std::string());
         voice.doubao_auth_mode = VoiceInput::NormalizeDoubaoAuthMode(

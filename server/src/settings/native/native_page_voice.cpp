@@ -786,6 +786,10 @@ struct VoicePage : std::enable_shared_from_this<VoicePage>
         enabled->SetOnChanged([this](bool on) { Write("voice_input.voice_input", on); });
         page.AddSection(MakeRows({MakeRow(L"启用语音输入", L"在右键菜单中点击“语音输入”开始或停止录音", enabled)}));
 
+        page.AddSection(MakeRows({MakeRow(
+            L"保存语音记录", L"将结束的录音和识别原文保存在本机。可在水杉右键菜单打开记录目录或重试未转写的录音。",
+            BindToggle(context, "voice_input.save_history"))}));
+
         // 录音提示音
         {
             auto expander = std::make_shared<PlainExpander>(L"录音提示音", BodyStyle());
