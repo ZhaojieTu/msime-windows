@@ -29,24 +29,8 @@ on:
           - tip
           - server
   push:
-    branches-ignore:
-      - develop
-      - main
-      - 'release-please--*'
-      # The Windows 7 port lives in its own repository with dev-build-win7.yml; branches named for
-      # it are pushed here from that work and would only rebuild an artifact nobody asked for.
-      - 'win7*'
-    tags-ignore:
-      - '**'
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-  pull_request:
     branches:
-      - develop
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+      - verify/pr-1-windows
 
 permissions:
   contents: read
@@ -69,7 +53,7 @@ jobs:
   tip:
     name: TSF ${{ matrix.name }}
     if: ${{ (inputs.component || 'all') == 'all' || (inputs.component || 'all') == 'tip' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -139,7 +123,7 @@ jobs:
   server:
     name: Server
     if: ${{ (inputs.component || 'all') == 'all' || (inputs.component || 'all') == 'server' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -265,7 +249,7 @@ jobs:
     # Only component=all produces an installer: packaging needs both TSF architectures and the
     # Server, so there is no meaningful way to package a single-component run.
     if: ${{ !cancelled() && needs.tip.result == 'success' && needs.server.result == 'success' && (inputs.component || 'all') == 'all' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 60
     steps:
       - name: Check out source
