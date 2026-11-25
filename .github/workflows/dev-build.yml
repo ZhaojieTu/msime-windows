@@ -30,7 +30,7 @@ on:
           - server
   push:
     branches:
-      - verify/voice-receipts-windows
+      - verify/voice-receipts-v2
 
 permissions:
   contents: read
