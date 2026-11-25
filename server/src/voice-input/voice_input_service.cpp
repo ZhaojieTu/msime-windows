@@ -1707,7 +1707,11 @@ bool StartRecording()
         AbortPendingStart("aborted before capture");
         return false;
     }
-    if (!g_capture.start(AudioCallback))
+    // Fixture-only capture source for the disposable hosted Windows test.
+    wchar_t smoke[2]{};
+    const bool use_smoke_audio =
+        GetEnvironmentVariableW(L"MSIME_FORK_SMOKE_AUDIO", smoke, 2) == 1 && smoke[0] == L'1';
+    if (!use_smoke_audio && !g_capture.start(AudioCallback))
     {
         AbortPendingStart("capture start failed");
         ShowVoiceNotice(L"无法启动麦克风。");
@@ -1730,6 +1734,11 @@ bool StartRecording()
         g_capture.stop();
         AbortPendingStart("aborted after capture start");
         return false;
+    }
+    if (use_smoke_audio)
+    {
+        const std::vector<float> samples(kSampleRate, 0.1f);
+        AudioCallback(samples.data(), samples.size());
     }
     g_overlay.set_input_level(0.0f);
     g_overlay.set_listening(true);
