@@ -61,6 +61,7 @@ if (-not $profilePresent) { throw 'Water Fir did not appear in the Windows keybo
 $provider = Join-Path $fixture 'provider.py'
 @'
 import json
+import hashlib
 import pathlib
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -71,11 +72,16 @@ text = sys.argv[2]
 class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
         raw = self.rfile.read(int(self.headers["Content-Length"]))
-        if self.path != "/transcribe" or b"RIFF" not in raw or b"WAVE" not in raw:
+        start = raw.find(b"RIFF")
+        if self.path != "/transcribe" or start < 0 or raw[start + 8:start + 12] != b"WAVE":
+            self.send_error(400)
+            return
+        end = start + 8 + int.from_bytes(raw[start + 4:start + 8], "little")
+        if end > len(raw):
             self.send_error(400)
             return
         with (root / "requests.txt").open("a", encoding="ascii") as log:
-            log.write("received_wav\n")
+            log.write(hashlib.sha256(raw[start:end]).hexdigest() + "\n")
         response = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -122,11 +128,10 @@ try {
     [IO.File]::WriteAllText($config,$after,[Text.UTF8Encoding]::new($false))
     $env:METASEQUOIA_IME_DATA_DIR=$data
     $env:METASEQUOIA_IME_CONFIG_DIR=$data
-    $env:MSIME_FORK_SMOKE_AUDIO='1'
     $exe = Join-Path $env:ProgramFiles 'metasequoiaime\server\MetasequoiaImeServer.exe'
     $server = Start-Process -FilePath $exe -ArgumentList '--watchdog-managed' -WorkingDirectory (Split-Path -Parent $exe) -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
-    if ($server.HasExited) { throw "Instrumented server exited: $($server.ExitCode)" }
+    if ($server.HasExited) { throw "Installed server exited: $($server.ExitCode)" }
 
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type @'
@@ -235,7 +240,8 @@ public static class VoiceSmoke
         "HOST_TEXT_LENGTH=$($editor.TextLength)" | Add-Content -LiteralPath $progress
     } finally { $timer.Dispose(); $form.Dispose() }
     if (-not $script:passed) { throw "Native Edit commit not verified: $script:why" }
-    if ((Get-Content -LiteralPath (Join-Path $fixture 'requests.txt') | Measure-Object).Count -ne 1) {throw 'Unexpected fixture upload count'}
+    $requests = @(Get-Content -LiteralPath (Join-Path $fixture 'requests.txt'))
+    if ($requests.Count -ne 1) {throw 'Unexpected fixture upload count'}
     $history = Join-Path $data 'voice-history'
     $texts = @(Get-ChildItem -LiteralPath $history -Recurse -File -Filter 'transcript.txt')
     if ($texts.Count -ne 1 -or [IO.File]::ReadAllText($texts[0].FullName) -cne $expected) {throw 'Original transcript recovery mismatch'}
@@ -245,10 +251,13 @@ public static class VoiceSmoke
     if($LASTEXITCODE -ne 0){throw 'Cannot parse saved WAV'}
     "ORIGINAL_WAV_METADATA=$meta" | Add-Content -LiteralPath $progress
     $wav = $meta | ConvertFrom-Json
-    if ($wav.channels -ne 1 -or $wav.width -ne 2 -or $wav.rate -ne 16000 -or $wav.frames -ne 16000) {
-        throw "Saved WAV does not match the one-second mono fixture: $meta"
+    if ($wav.channels -ne 1 -or $wav.width -ne 2 -or $wav.rate -ne 16000 -or $wav.frames -lt 4000) {
+        throw "Unexpected short-recording PCM WAV format: $meta"
     }
-    'ORIGINAL_WAV=1' | Add-Content -LiteralPath $progress
+    if ((Get-FileHash -LiteralPath $wavPath -Algorithm SHA256).Hash -ne $requests[0]) {
+        throw 'The saved original WAV differs from the WAV sent for recognition'
+    }
+    'ORIGINAL_WAV=1','ORIGINAL_WAV_MATCHES_UPLOAD=1' | Add-Content -LiteralPath $progress
 } finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
     if ($backend -and -not $backend.HasExited) { Stop-Process -Id $backend.Id -ErrorAction SilentlyContinue }

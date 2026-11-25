@@ -17,7 +17,7 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           github-token: ${{ github.token }}
-          run-id: 45609848658
+          run-id: 45609848647
           name: dev-installer
           path: ${{ runner.temp }}/installer
       - name: Verify native Windows input
