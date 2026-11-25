@@ -67,7 +67,7 @@ inline std::filesystem::path LatestUntranscribed(const std::filesystem::path &ro
     if (!std::filesystem::is_directory(root))
         return {};
     std::filesystem::path latest;
-    auto latest_time = std::filesystem::file_time_type::min();
+    auto latest_time = (std::filesystem::file_time_type::min)();
     for (const auto &entry : std::filesystem::directory_iterator(root))
     {
         if (!entry.is_directory() || entry.is_symlink())
