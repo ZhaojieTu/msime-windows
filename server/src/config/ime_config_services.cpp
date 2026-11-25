@@ -184,6 +184,8 @@ bool SetConfiguredVoiceInputBool(const std::string &key, bool value)
         target = &VoiceInputConfig::hotkey_ctrl_win;
     else if (key == "hotkey_rctrl_ralt")
         target = &VoiceInputConfig::hotkey_rctrl_ralt;
+    else if (key == "save_history")
+        target = &VoiceInputConfig::save_history;
     else if (key == "hotkey_hold_space_lock")
         target = &VoiceInputConfig::hotkey_hold_space_lock;
     else if (key == "start_sound")

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -37,7 +38,7 @@ struct FanyImeNamedpipeDataToTsfWorkerThread
 };
 struct VoiceInputConfig
 {
-    bool end_sound = false;
+    bool end_sound = false, save_history = false;
     std::string commit_mode = "tsf", asr_provider;
 };
 struct RecognitionResult
@@ -128,6 +129,7 @@ struct CuePlayer
     }
 } g_cue_player;
 std::mutex g_send_mutex, g_control_mutex, g_mutex;
+std::atomic<bool> g_save_voice_history{false};
 std::condition_variable g_control_cv;
 std::deque<ControlRequest> g_control_commands;
 std::atomic<std::uint64_t> g_voice_session{1}, g_dismissed_overlay_session{0};
@@ -143,6 +145,11 @@ std::unique_ptr<StreamingAsr> g_stream_asr;
 std::vector<std::future<void>> g_network_tasks;
 std::function<void()> g_during_capture, g_during_recognition;
 bool g_fast_valid = true, g_route_valid = true;
+bool g_host_accepts_delivery = true;
+bool g_polish = false;
+std::string g_recognition_error, g_saved_raw_text;
+std::vector<float> g_saved_audio;
+std::wstring g_notice;
 int g_pipe_attempts = 0, g_pipe_fail_at = 0, g_cancels = 0, g_send_input = 0;
 std::atomic<int> g_recognitions{0};
 namespace VoiceInput
@@ -175,7 +182,8 @@ bool SendToTsfWorkerThreadClientViaNamedpipe(std::uint64_t, std::uint64_t, UINT 
     }
     if (++g_pipe_attempts == g_pipe_fail_at)
         return false;
-    g_inserted += text;
+    if (g_host_accepts_delivery)
+        g_inserted += text;
     return true;
 }
 bool SendVoiceCompositionToTsfWorker(std::uint64_t client, std::uint64_t epoch, UINT type, const std::wstring &text)
@@ -207,8 +215,9 @@ enum class VoiceNoticeKind
     Error,
     SettingsNeeded,
 };
-void ShowVoiceNotice(std::wstring, VoiceNoticeKind = VoiceNoticeKind::Error)
+void ShowVoiceNotice(std::wstring text, VoiceNoticeKind = VoiceNoticeKind::Error)
 {
+    g_notice = std::move(text);
 }
 void Sleep(unsigned)
 {
@@ -218,15 +227,34 @@ RecognitionResult Recognize(const std::vector<float> &, const VoiceInputConfig &
     ++g_recognitions;
     if (g_during_recognition)
         g_during_recognition();
-    return {"recognized", {}};
+    return {"recognized", g_recognition_error};
+}
+struct VoiceHistoryActivity
+{
+    explicit VoiceHistoryActivity(bool)
+    {
+    }
+    void Finish()
+    {
+    }
+};
+std::filesystem::path KeepVoiceRecording(const std::vector<float> &samples)
+{
+    g_saved_audio = samples;
+    return "test entry";
+}
+bool KeepVoiceTranscript(const std::filesystem::path &, const std::string &text)
+{
+    g_saved_raw_text = text;
+    return true;
 }
 bool ShouldPolish(const std::string &, const VoiceInputConfig &)
 {
-    return false;
+    return g_polish;
 }
 std::string Polish(const std::string &text, const VoiceInputConfig &)
 {
-    return text;
+    return g_polish ? "polished" : text;
 }
 bool StartRecording()
 {
@@ -265,7 +293,13 @@ void Reset()
     g_inline_owner = {};
     g_inline_owner_session = 0;
     g_during_capture = g_during_recognition = {};
-    g_fast_valid = g_route_valid = true;
+    g_fast_valid = g_route_valid = g_host_accepts_delivery = true;
+    g_polish = false;
+    g_save_voice_history = false;
+    g_saved_audio.clear();
+    g_saved_raw_text.clear();
+    g_recognition_error.clear();
+    g_notice.clear();
     g_pipe_attempts = g_pipe_fail_at = g_cancels = g_send_input = g_recognitions = 0;
     g_inserted.clear();
 }
@@ -418,6 +452,40 @@ void TestTsfPartialDeliveryKeepsFullCard()
     CHECK(g_result_card.shows == 1 && g_result_card.text == string_to_wstring(original));
     CHECK(g_send_input == 0);
 }
+void TestTsfWorkerAcceptsPacketButHostDropsEdit()
+{
+    Reset();
+    BindOwner();
+    g_host_accepts_delivery = false;
+    CommitRecognizedText("voice text", {}, false, g_target, 1);
+    g_host_accepts_delivery = true;
+    CHECK(g_pipe_attempts > 0 && g_inserted.empty());
+    CHECK(g_result_card.shows == 1 && g_result_card.text == L"voice text");
+    CHECK(g_send_input == 0);
+}
+
+void TestSaveBeforeRecognitionAndKeepOnlyRawSuccess()
+{
+    for (bool fail : {false, true})
+    {
+        Reset();
+        BindOwner();
+        const std::vector<float> audio(kSampleRate, 0.2f);
+        g_samples = audio;
+        g_save_voice_history = true;
+        g_polish = true;
+        if (fail)
+            g_recognition_error = "temporary service error";
+        g_during_recognition = [&] { CHECK(g_saved_audio == audio); };
+        StopRecording(1);
+        WaitForRecognition();
+        CHECK(g_saved_audio == audio);
+        CHECK(g_saved_raw_text == (fail ? "" : "recognized"));
+        CHECK(g_inserted == (fail ? L"" : L"polished"));
+        CHECK(!g_notice.empty() == fail);
+    }
+}
+
 int main()
 {
     try
@@ -430,6 +498,8 @@ int main()
         TestStaleCancelPreservesNewRecording();
         TestOwnerCancellationFences();
         TestTsfPartialDeliveryKeepsFullCard();
+        TestTsfWorkerAcceptsPacketButHostDropsEdit();
+        TestSaveBeforeRecognitionAndKeepOnlyRawSuccess();
         std::cout << "PASS voice service cancellation, owner and partial-delivery regressions\n";
         return 0;
     }
