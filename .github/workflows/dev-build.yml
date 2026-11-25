@@ -1,4 +1,4 @@
-name: Dev build
+name: Windows voice input smoke
 
 # Development builds for contributors. The point is that a newcomer does not install vcpkg,
 # Boost, Inno Setup and the Windows SDK to try a change; the runner builds, packages and signs,
@@ -29,24 +29,8 @@ on:
           - tip
           - server
   push:
-    branches-ignore:
-      - develop
-      - main
-      - 'release-please--*'
-      # The Windows 7 port lives in its own repository with dev-build-win7.yml; branches named for
-      # it are pushed here from that work and would only rebuild an artifact nobody asked for.
-      - 'win7*'
-    tags-ignore:
-      - '**'
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-  pull_request:
     branches:
-      - develop
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+      - verify/voice-receipts-windows
 
 permissions:
   contents: read
@@ -69,7 +53,7 @@ jobs:
   tip:
     name: TSF ${{ matrix.name }}
     if: ${{ (inputs.component || 'all') == 'all' || (inputs.component || 'all') == 'tip' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -139,7 +123,7 @@ jobs:
   server:
     name: Server
     if: ${{ (inputs.component || 'all') == 'all' || (inputs.component || 'all') == 'server' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -265,7 +249,7 @@ jobs:
     # Only component=all produces an installer: packaging needs both TSF architectures and the
     # Server, so there is no meaningful way to package a single-component run.
     if: ${{ !cancelled() && needs.tip.result == 'success' && needs.server.result == 'success' && (inputs.component || 'all') == 'all' }}
-    runs-on: depot-windows-2025-8
+    runs-on: windows-2025
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -362,6 +346,19 @@ jobs:
             ${{ runner.temp }}/dev-build.cer
             installer/import-dev-trust.ps1
           if-no-files-found: error
+      - name: Verify voice delivery to a native Windows Edit control
+        shell: pwsh
+        env:
+          DEV_INSTALLER: ${{ steps.asset.outputs.installer_path }}
+        run: ./scripts/ci/verify-voice-input-fork.ps1 -Installer $env:DEV_INSTALLER -Certificate "$env:RUNNER_TEMP/dev-build.cer"
+      - name: Upload native voice acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: voice-native-acceptance
+          retention-days: 7
+          path: ${{ runner.temp }}/msime-voice-proof
+          if-no-files-found: ignore
       # 免安装包与安装包共用同一次 Prepare-PackageFiles 产物，额外只花一次复制加压缩的工夫。
       # 它解决的问题是「只想看一眼设置窗口」：安装包要管理员权限、装 TSF、导入证书，看界面
       # 一样都用不上。两个产物各管一件事，谁也不替代谁。
