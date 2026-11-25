@@ -24,9 +24,10 @@ jobs:
         shell: pwsh
         run: |
           $root=Join-Path $env:RUNNER_TEMP 'installer'
-          $installer=@(Get-ChildItem -LiteralPath $root -File -Filter 'MetasequoiaIME_Setup*.exe')
-          if($installer.Count -ne 1){throw 'Expected one installer'}
-          ./scripts/ci/verify-voice-input-fork.ps1 -Installer $installer[0].FullName -Certificate (Join-Path $root 'dev-build.cer')
+          $installer=@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'MetasequoiaIME_Setup*.exe')
+          $cert=@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter 'dev-build.cer')
+          if($installer.Count -ne 1 -or $cert.Count -ne 1){throw 'Expected one installer and certificate'}
+          ./scripts/ci/verify-voice-input-fork.ps1 -Installer $installer[0].FullName -Certificate $cert[0].FullName
       - name: Upload native acceptance evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
